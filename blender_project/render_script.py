@@ -53,7 +53,7 @@ def _load_source(args: Namespace):
     return num_max_frames, mesh_files, data_npy, output_prefix
 
 
-def _get_materials(args):
+def _get_materials(args: Namespace):
     m = bpy.data.materials.get("material_avg")
     # assert not args.with_texture
     if not args.with_texture:
@@ -61,7 +61,21 @@ def _get_materials(args):
         nodes = node_tree.nodes
         bsdf = nodes.get("Principled BSDF")
         node_tree.links.remove(bsdf.inputs['Base Color'].links[0])
+        if args.base_color is not None:
+            base_color = tuple(args.base_color)
+            if len(base_color) == 3:
+                base_color += (1,)
+            bsdf.inputs["Base Color"].default_value = base_color
     return m
+
+
+LMKS_VIDX = [
+    1526, 916, 917, 908, 880, 826, 786, 773,  # 0...7
+    1705, 121, 116, 94, 214, 237, 247, 246,  # 8...15
+    659, 1271, 1273, 1275, 1078, 1113, 1484, 407, 414, 631, 629, 627, 35,  # 16...28
+    495, 491, 492, 512, 510, 440, 441, 1460, 1103, 1102, 1172, 1174, 1154, 1153, 1157,  # 29...
+    1049, 1048, 1198, 1193, 1194, 1236, 1237, 1450, 579, 578, 536, 535, 540, 380, 381,  # 58
+]
 
 
 if __name__ == "__main__":
@@ -72,6 +86,7 @@ if __name__ == "__main__":
     parser.add_argument("-e", "--end_frame", type=int)
     parser.add_argument("--fps", type=int, default=25)
     parser.add_argument("--format", type=str, default="mp4")
+    parser.add_argument("--scale", type=float, default=10)
     parser.add_argument("--is_source_offsets", action="store_true")
     parser.add_argument("--idle_fpath", type=str)
     parser.add_argument("--image_w", type=int, default=688)
@@ -82,6 +97,7 @@ if __name__ == "__main__":
     parser.add_argument("--template_vidx", type=str)
     parser.add_argument("--smooth_shading", action="store_true")
     parser.add_argument("--with_texture", action="store_true")
+    parser.add_argument("--base_color", nargs=4, type=float)
     parser.add_argument("--small_size", action="store_true")
     parser.add_argument("-Q", "--quiet", action="store_true")
     args = parser.parse_args()
@@ -128,6 +144,9 @@ if __name__ == "__main__":
         flame_object.scale = (10, 10, 10)
         flame_object.data.materials.clear()
         flame_object.data.materials.append(material)
+        
+    # > Scaling.
+    flame_object.scale = (args.scale, args.scale, args.scale)
 
     # > Shading mode: smooth / flat
     for poly in flame_object.data.polygons:
@@ -148,6 +167,8 @@ if __name__ == "__main__":
         print("(+) Render images: {}".format(os.path.dirname(output_prefix)))
     print(f"Will render {num_frames} frames.")
     sys.stdout.flush()
+
+    A = min(args.image_h, args.image_w)
     utils.set_output_properties(scene, (args.image_w, args.image_h), output_prefix)
     utils.set_eevee_renderer(
         scene, camera_object,
@@ -169,16 +190,33 @@ if __name__ == "__main__":
         fcurves_list.extend(fcurves)
     utils.set_animation(scene, fps=args.fps, frame_start=stt_frame + 1, frame_end=end_frame)
     # > Set keyframes
+    os.makedirs(output_prefix, exist_ok=True)
     num_verts = len(flame_object.data.vertices)
     co_list = np.zeros((num_verts * 3, 2 * num_frames), np.float32)
     for i in range(num_frames):
+        # get verts.
         if mesh_files is not None:
             vdata = np.load(mesh_files[i + stt_frame])
         else:
             vdata = data_npy[i + stt_frame]
         if args.is_source_offsets:
             vdata = vdata + tmpl_verts
-        vdata = vdata[vert_idx].flatten()
+        verts = vdata[vert_idx]
+        verts = np.squeeze(verts)
+        # projection
+        xy_list = []
+        for vidx in LMKS_VIDX:
+            v = utils.Vector(verts[vidx] * args.scale)
+            p = utils.project_3d_point(camera_object, v)
+            xx = (p.x * 0.5 + 0.5) * args.image_w
+            yy = (-p.y * 0.5 + 0.5) * args.image_h
+            xy_list.append((int(xx), int(yy)))
+        with open(output_prefix + f"{i+1:04d}.txt", "w") as fp:
+            for x, y in xy_list:
+                fp.write(f"{x} {y}\n")
+
+        # set animation keyframe
+        vdata = verts.flatten()
         co_list[:, i * 2 + 0] = i + stt_frame + 1
         co_list[:, i * 2 + 1] = vdata
         print("(+) Read keyframe {}".format(i + 1), end="\r")

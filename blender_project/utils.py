@@ -3,7 +3,8 @@ import os
 import re
 import sys
 import time
-from typing import Any, Callable, List, Tuple
+from math import radians
+from typing import Any, Callable, List, Tuple, Optional
 
 import bmesh
 import bpy
@@ -175,5 +176,69 @@ def set_eevee_renderer(
     else:
         assert file_format == "png", "Unknown format: {}".format(file_format)
         scene.render.image_settings.file_format = "PNG"
+        scene.render.image_settings.color_mode = "RGBA" if use_transparent_bg else "RGB"
 
     scene.eevee.taa_render_samples = num_samples
+
+
+from mathutils import Vector, Matrix
+
+
+def project_3d_point(
+    camera: bpy.types.Object,
+    p: Vector,
+    render: Optional[bpy.types.RenderSettings] = None
+) -> Vector:
+    """
+    Given a camera and its projection matrix M;
+    given p, a 3d point to project:
+
+    Compute P’ = M * P
+    P’= (x’, y’, z’, w')
+
+    Ignore z'
+    Normalize in:
+    x’’ = x’ / w’
+    y’’ = y’ / w’
+
+    x’’ is the screen coordinate in normalised range -1 (left) +1 (right)
+    y’’ is the screen coordinate in  normalised range -1 (bottom) +1 (top)
+
+    :param camera: The camera for which we want the projection
+    :param p: The 3D point to project
+    :param render: The render settings associated to the scene.
+    :return: The 2D projected point in normalized range [-1, 1] (left to right, bottom to top)
+    """
+    
+    if render is None:
+        render = bpy.context.scene.render
+
+    if camera.type != 'CAMERA':
+        raise Exception("Object {} is not a camera.".format(camera.name))
+
+    if len(p) != 3:
+        raise Exception("Vector {} is not three-dimensional".format(p))
+
+    # Get the two components to calculate M
+    rotat_matrix = Matrix.Rotation(radians(90.0), 4, 'X')
+    modelview_matrix = camera.matrix_world.inverted()
+    projection_matrix = camera.calc_matrix_camera(
+        bpy.data.scenes["Scene"].view_layers["View Layer"].depsgraph,
+        x = render.resolution_x,
+        y = render.resolution_y,
+        scale_x = render.pixel_aspect_x,
+        scale_y = render.pixel_aspect_y,
+    )
+
+    # print(projection_matrix)
+    # print(modelview_matrix)
+    # print(render.resolution_x)
+    # print(render.resolution_y)
+    # print(render.pixel_aspect_x)
+    # print(render.pixel_aspect_y)
+
+    # Compute P’ = M * P
+    p1 = projection_matrix @ modelview_matrix @ rotat_matrix @ Vector((p.x, p.y, p.z, 1))
+    # Normalize in: x’’ = x’ / w’, y’’ = y’ / w’
+    p2 = Vector(((p1.x/p1.w, p1.y/p1.w)))
+    return p2

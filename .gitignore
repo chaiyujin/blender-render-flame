@@ -3,3 +3,5 @@
 *.py[cod]
 __pycache__
 *.mp4
+*.blend1
+*.txt

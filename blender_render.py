@@ -2,12 +2,85 @@ import os
 import re
 import subprocess
 import shutil
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
+import cv2
+import numpy as np
+import numpy.typing as npt
 from rich.progress import (BarColumn, Progress, SpinnerColumn, TextColumn,
                            TimeElapsedColumn, TimeRemainingColumn)
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
+ImageU8 = npt.NDArray[np.uint8]
+
+
+def _fill_hole(trans: ImageU8):
+    im_th = trans[..., -1] if trans.ndim == 3 else trans
+    assert im_th.ndim == 2
+    # Copy the thresholded image.
+    im_floodfill = im_th.copy()
+
+    # Mask used to flood filling.
+    # Notice the size needs to be 2 pixels than the image.
+    h, w = im_th.shape[:2]
+    mask = np.zeros((h + 2, w + 2), np.uint8)
+    cv2.floodFill(im_floodfill, mask, (0, 0), 255)  # type: ignore
+    im_floodfill_inv = cv2.bitwise_not(im_floodfill)  # type: ignore
+    im_out = im_th | im_floodfill_inv
+    return im_out[:, :, None]
+
+
+def _postprocess_fill_inner_hole(filepath: str):
+    if os.path.splitext(filepath)[1].lower() != '.png':
+        return
+
+    im: ImageU8 = cv2.imread(filepath, cv2.IMREAD_UNCHANGED)  # type: ignore
+    if im.shape[-1] == 3:
+        return
+
+    im_alpha = _fill_hole(im[..., 3])
+    im = np.concatenate([im[..., :3], im_alpha], axis=-1)  # type: ignore
+    cv2.imwrite(filepath, im)
+
+
+def _postprocess_get_contour(filepath: str):
+    if os.path.splitext(filepath)[1].lower() != '.png':
+        return
+
+    im: ImageU8 = cv2.imread(filepath, cv2.IMREAD_UNCHANGED)  # type: ignore
+    if im.shape[-1] == 3:
+        return
+    
+    def dilatation(img: ImageU8, ksz: int = 5):
+        kernel = np.ones((ksz, ksz), np.uint8)
+        img_dilation = cv2.dilate(img, kernel, iterations=1)
+        if img_dilation.ndim == 2:
+            img_dilation = img_dilation[..., None]
+        return img_dilation
+
+    im_alpha = im[..., 3:]
+    im_contour = dilatation(im_alpha) - im_alpha
+    
+    txt_path = os.path.splitext(filepath)[0] + ".txt"
+    if os.path.exists(txt_path):
+        xy_list = []
+        with open(txt_path) as fp:
+            for line in fp:
+                x, y = line.strip().split()
+                xy_list.append((int(x), int(y)))
+        assert len(xy_list) == 59
+        for idx_list in [
+            list(range(0, 8)) + [0],
+            list(range(8, 16)) + [8],
+            list(range(16, 29)),
+            list(range(29, 57)) + [29],
+        ]:
+            for k in range(len(idx_list) - 1):
+                i = idx_list[k]
+                j = idx_list[k + 1]
+                cv2.line(im_contour, xy_list[i], xy_list[j], (255, 255, 255), thickness=2)
+
+    cv2.imwrite(os.path.splitext(filepath)[0] + "_cntr.png", im_contour)
 
 
 class Pattern(object):
@@ -39,6 +112,8 @@ class BlenderRenderProgress(object):
         progress: Optional[Progress] = None,
         task: Optional[int] = None,
         keep_showing: bool = False,
+        fill_inner_hole: bool = True,
+        draw_contour: bool = True,
         **kwargs: Any
     ):
         # modify args
@@ -55,8 +130,13 @@ class BlenderRenderProgress(object):
                 if v:
                     self.args.append("--" + k)
             elif v is not None:
-                self.args.append("--" + k)
-                self.args.append(str(v))
+                if isinstance(v, (tuple, list)):
+                    self.args.append("--" + k)
+                    for x in v:
+                        self.args.append(str(x))
+                else:
+                    self.args.append("--" + k)
+                    self.args.append(str(v))
         if progress is None:
             self.progress = Progress(
                 "{task.description}",
@@ -74,7 +154,9 @@ class BlenderRenderProgress(object):
             self.stop_on_end = False
         self.task: Optional[int] = task
         self.keep_showing = keep_showing
-        
+        self.fill_inner_hole = fill_inner_hole
+        self.draw_contour = draw_contour
+
         # Find the blender
         self.blender_cmd = ""
         for path in [
@@ -106,6 +188,8 @@ class BlenderRenderProgress(object):
             "--render-anim",
             "--",
         ] + list(self.args)
+        # print(" ".join(args))
+        # quit()
 
         p = subprocess.Popen(args, stdout=subprocess.PIPE, stdin=subprocess.PIPE)
         try:
@@ -178,6 +262,14 @@ class BlenderRenderProgress(object):
                 self._is_started = True
             if self.task is not None:
                 self.progress.update(self.task, completed=cur_frame)
+            
+            if self.output is not None:
+                filepath = os.path.join(self.output, f"{cur_frame:04d}.png")
+                if os.path.exists(filepath) and self.fill_inner_hole:
+                    _postprocess_fill_inner_hole(filepath)
+                if os.path.exists(filepath) and self.draw_contour:
+                    _postprocess_get_contour(filepath)
+                # if os.path.exists(filepath):
         elif pattern in [Pattern.FRAME_INFO, Pattern.TIME_INFO]:
             pass
         else:
@@ -207,10 +299,16 @@ def blender_render(
     camera: str = "Camera",
     smooth_shading: bool = True,
     with_texture: bool = False,
+    base_color: Optional[Tuple[float, float, float, float]] = None,
     small_size: bool = False,
     keep_showing: bool = True,
+    fill_inner_hole: bool = False,
+    draw_contour: bool = False,
     **kwargs: Any,
 ):
+    if base_color is not None:
+        assert len(base_color) == 4, "'base_color' must be a 4-float tuple."
+
     pbar = BlenderRenderProgress(
         source_path=source_path,
         output_prefix=output_prefix,
@@ -226,8 +324,11 @@ def blender_render(
         camera=camera,
         smooth_shading=smooth_shading,
         with_texture=with_texture,
+        base_color=base_color,
         small_size=small_size,
         keep_showing=keep_showing,
+        fill_inner_hole=fill_inner_hole,
+        draw_contour=draw_contour,
         **kwargs
     )
     pbar.run()
@@ -235,10 +336,14 @@ def blender_render(
 
 
 if __name__ == "__main__":
+    import sys
     blender_render(
-        source_path="./test_inp/*_x_data.ply",
-        output_prefix="./test_out",
+        source_path=sys.argv[1],
+        output_prefix="./test_out/",
         smooth_shading=True,
         end_frame=50,
+        base_color=(0, 0.7, 0.7, 0.5),
         format="png",
+        fill_inner_hole=True,
+        draw_contour=True,
     )
