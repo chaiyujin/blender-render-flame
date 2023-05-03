@@ -83,6 +83,20 @@ def _postprocess_get_contour(filepath: str):
     cv2.imwrite(os.path.splitext(filepath)[0] + "_cntr.png", im_contour)
 
 
+def _postprocess_set_background_color(fpath: str, color: Tuple[float, float, float]):
+    im: ImageU8 = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)  # type: ignore
+    if im.shape[-1] == 3:
+        return
+    
+    im = im.astype(np.float32) / 255.0
+    bg = np.zeros_like(im[..., :3], np.float32)
+    bg[:, :] = color
+    alpha = im[..., 3:]
+    im = im[..., :3] * alpha + bg * (1 - alpha)
+    im = np.clip(im * 255.0, 0, 255).astype(np.uint8)
+    cv2.imwrite(fpath, im)
+
+
 class Pattern(object):
     N_FRAMES = r"Will render (\d+) frames"
     OUTPUT = r"\(\+\) Render (video|images): (.+)"
@@ -114,6 +128,7 @@ class BlenderRenderProgress(object):
         keep_showing: bool = False,
         fill_inner_hole: bool = True,
         draw_contour: bool = True,
+        background_color: Optional[Tuple[float, float, float]] = None,
         **kwargs: Any
     ):
         # modify args
@@ -137,6 +152,8 @@ class BlenderRenderProgress(object):
                 else:
                     self.args.append("--" + k)
                     self.args.append(str(v))
+        if draw_contour:
+            self.args.append("--project_landmarks")
         if progress is None:
             self.progress = Progress(
                 "{task.description}",
@@ -156,6 +173,7 @@ class BlenderRenderProgress(object):
         self.keep_showing = keep_showing
         self.fill_inner_hole = fill_inner_hole
         self.draw_contour = draw_contour
+        self.background_color = background_color
 
         # Find the blender
         self.blender_cmd = ""
@@ -269,6 +287,8 @@ class BlenderRenderProgress(object):
                     _postprocess_fill_inner_hole(filepath)
                 if os.path.exists(filepath) and self.draw_contour:
                     _postprocess_get_contour(filepath)
+                if os.path.exists(filepath) and self.background_color is not None:
+                    _postprocess_set_background_color(filepath, self.background_color)
                 # if os.path.exists(filepath):
         elif pattern in [Pattern.FRAME_INFO, Pattern.TIME_INFO]:
             pass
@@ -304,6 +324,7 @@ def blender_render(
     keep_showing: bool = True,
     fill_inner_hole: bool = False,
     draw_contour: bool = False,
+    background_color: Optional[Tuple[float, float, float]] = None,
     **kwargs: Any,
 ):
     if base_color is not None:
@@ -329,6 +350,7 @@ def blender_render(
         keep_showing=keep_showing,
         fill_inner_hole=fill_inner_hole,
         draw_contour=draw_contour,
+        background_color=background_color,
         **kwargs
     )
     pbar.run()
@@ -337,13 +359,22 @@ def blender_render(
 
 if __name__ == "__main__":
     import sys
+    # blender_render(
+    #     source_path=sys.argv[1],
+    #     output_prefix="./test_out/",
+    #     smooth_shading=True,
+    #     end_frame=50,
+    #     base_color=(0, 0.7, 0.7, 0.5),
+    #     format="png",
+    #     fill_inner_hole=True,
+    #     draw_contour=True,
+    # )
     blender_render(
         source_path=sys.argv[1],
         output_prefix="./test_out/",
         smooth_shading=True,
-        end_frame=50,
-        base_color=(0, 0.7, 0.7, 0.5),
+        base_color=(0.7, 0.7, 0.7, 1.0),
         format="png",
+        with_texture=True,
         fill_inner_hole=True,
-        draw_contour=True,
     )

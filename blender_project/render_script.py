@@ -99,6 +99,7 @@ if __name__ == "__main__":
     parser.add_argument("--with_texture", action="store_true")
     parser.add_argument("--base_color", nargs=4, type=float)
     parser.add_argument("--small_size", action="store_true")
+    parser.add_argument("--project_landmarks", action="store_true")
     parser.add_argument("-Q", "--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -204,16 +205,17 @@ if __name__ == "__main__":
         verts = vdata[vert_idx]
         verts = np.squeeze(verts)
         # projection
-        xy_list = []
-        for vidx in LMKS_VIDX:
-            v = utils.Vector(verts[vidx] * args.scale)
-            p = utils.project_3d_point(camera_object, v)
-            xx = (p.x * 0.5 + 0.5) * args.image_w
-            yy = (-p.y * 0.5 + 0.5) * args.image_h
-            xy_list.append((int(xx), int(yy)))
-        with open(output_prefix + f"{i+1:04d}.txt", "w") as fp:
-            for x, y in xy_list:
-                fp.write(f"{x} {y}\n")
+        if args.project_landmarks:
+            xy_list = []
+            for vidx in LMKS_VIDX:
+                v = utils.Vector(verts[vidx] * args.scale)
+                p = utils.project_3d_point(camera_object, v)
+                xx = (p.x * 0.5 + 0.5) * args.image_w
+                yy = (-p.y * 0.5 + 0.5) * args.image_h
+                xy_list.append((int(xx), int(yy)))
+            with open(output_prefix + f"{i+1:04d}.txt", "w") as fp:
+                for x, y in xy_list:
+                    fp.write(f"{x} {y}\n")
 
         # set animation keyframe
         vdata = verts.flatten()
