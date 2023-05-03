@@ -1,7 +1,9 @@
 import os
 import sys
+import random
 from argparse import Namespace
 from glob import glob
+from typing import Any
 
 import bmesh
 import bpy
@@ -53,20 +55,56 @@ def _load_source(args: Namespace):
     return num_max_frames, mesh_files, data_npy, output_prefix
 
 
+def _init_vert_colors(flame_object: Any):
+    mesh = flame_object.data
+    if not mesh.vertex_colors:
+        mesh.vertex_colors.new()
+
+
+def frame_pre_handler(scene: Any):
+    print("Frame Change", scene.frame_current)
+    flame_object = bpy.data.objects["TMPL"]
+    mesh = flame_object.data
+    color_layer = mesh.vertex_colors["Col"]
+    i = 0
+    for poly in mesh.polygons:
+        for idx in poly.loop_indices:
+            r, g, b = [random.random() for _ in range(3)]
+            color_layer.data[i].color = (r, g, b, 1.0)
+            i += 1
+
+    # get verts.
+    i = scene.frame_current - 1
+    if mesh_files is not None:
+        vdata = np.load(mesh_files[i + stt_frame])
+    else:
+        vdata = data_npy[i + stt_frame]
+    if args.is_source_offsets:
+        vdata = vdata + tmpl_verts
+    verts = vdata[vert_idx]
+    verts = verts.reshape(-1, 3)
+
+    for iv, v in enumerate(flame_object.data.vertices):
+        v.co = tuple(verts[iv])
+
+
 def _get_materials(args: Namespace):
-    m = bpy.data.materials.get("material_avg")
-    # assert not args.with_texture
-    if not args.with_texture:
-        node_tree = m.node_tree
-        nodes = node_tree.nodes
-        bsdf = nodes.get("Principled BSDF")
-        node_tree.links.remove(bsdf.inputs['Base Color'].links[0])
-        if args.base_color is not None:
-            base_color = tuple(args.base_color)
-            if len(base_color) == 3:
-                base_color += (1,)
-            bsdf.inputs["Base Color"].default_value = base_color
-    return m
+    if args.vertex_color_path is not None:
+        return bpy.data.materials.get("material_vert_col")
+    else:
+        m = bpy.data.materials.get("material_avg")
+        # assert not args.with_texture
+        if not args.with_texture:
+            node_tree = m.node_tree
+            nodes = node_tree.nodes
+            bsdf = nodes.get("Principled BSDF")
+            node_tree.links.remove(bsdf.inputs['Base Color'].links[0])
+            if args.base_color is not None:
+                base_color = tuple(args.base_color)
+                if len(base_color) == 3:
+                    base_color += (1,)
+                bsdf.inputs["Base Color"].default_value = base_color
+        return m
 
 
 LMKS_VIDX = [
@@ -81,6 +119,7 @@ LMKS_VIDX = [
 if __name__ == "__main__":
     parser = utils.ArgumentParserForBlender()
     parser.add_argument("-S", "--source_path", type=str, required=True)
+    parser.add_argument("-C", "--vertex_color_path", type=str, required=False)
     parser.add_argument("-O", "--output_prefix", type=str, required=True)
     parser.add_argument("-s", "--stt_frame", type=int)
     parser.add_argument("-e", "--end_frame", type=int)
@@ -128,6 +167,7 @@ if __name__ == "__main__":
     vert_idx = None
     if args.template_path is None:
         flame_object = bpy.data.objects["TMPL"]
+        flame_object.data.materials[0] = material
     else:
         # if args.template_vidx is None or not os.path.exists(args.template_vidx):
         #     raise ValueError("(!) --template_path is set, but --template_vidx is not given!")
@@ -145,7 +185,10 @@ if __name__ == "__main__":
         flame_object.scale = (10, 10, 10)
         flame_object.data.materials.clear()
         flame_object.data.materials.append(material)
-        
+    
+    _init_vert_colors(flame_object)
+    bpy.app.handlers.frame_change_pre.append(frame_pre_handler)
+
     # > Scaling.
     flame_object.scale = (args.scale, args.scale, args.scale)
 
@@ -183,12 +226,12 @@ if __name__ == "__main__":
     flame_object.data.animation_data_create()
     flame_object.data.animation_data.action = action
     # > Create fcurves for animation
-    fcurves_list = []
-    for iv, v in enumerate(flame_object.data.vertices):
-        fcurves = [action.fcurves.new(f"vertices[{v.index:d}].co", index=k) for k in range(3)]
-        for fcurve in fcurves:
-            fcurve.keyframe_points.add(count=num_frames)
-        fcurves_list.extend(fcurves)
+    # fcurves_list = []
+    # for iv, v in enumerate(flame_object.data.vertices):
+    #     fcurves = [action.fcurves.new(f"vertices[{v.index:d}].co", index=k) for k in range(3)]
+    #     for fcurve in fcurves:
+    #         fcurve.keyframe_points.add(count=num_frames)
+    #     fcurves_list.extend(fcurves)
     utils.set_animation(scene, fps=args.fps, frame_start=stt_frame + 1, frame_end=end_frame)
     # > Set keyframes
     os.makedirs(output_prefix, exist_ok=True)
@@ -222,6 +265,6 @@ if __name__ == "__main__":
         co_list[:, i * 2 + 0] = i + stt_frame + 1
         co_list[:, i * 2 + 1] = vdata
         print("(+) Read keyframe {}".format(i + 1), end="\r")
-    # foreach set
-    for fcu, vals in zip(fcurves_list, co_list):
-        fcu.keyframe_points.foreach_set("co", vals)
+    # # foreach set
+    # for fcu, vals in zip(fcurves_list, co_list):
+    #     fcu.keyframe_points.foreach_set("co", vals)
